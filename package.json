@@ -1,0 +1,43 @@
+{
+  "name": "java-refactor-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Java and TypeScript refactoring via OpenRewrite and ts-morph",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "java-refactor-mcp": "build/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "tsx src/index.ts",
+    "clean": "rm -rf build",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "ts-morph": "^24.0.0",
+    "zod": "^3.23.0",
+    "diff": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/diff": "^5.0.0",
+    "typescript": "^5.3.0",
+    "tsx": "^4.0.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "refactoring",
+    "openrewrite",
+    "ts-morph",
+    "java",
+    "typescript",
+    "model-context-protocol"
+  ],
+  "license": "MIT"
+}
