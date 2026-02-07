@@ -210,3 +210,67 @@ recipeList:
 ${recipeListItems}
 `.trim();
 }
+
+/**
+ * Parameter to add in a signature change
+ */
+export interface ParameterToAdd {
+  type: string;
+  name: string;
+  index?: number;
+}
+
+/**
+ * Builds a composite recipe for changing method signature with multiple operations.
+ * Operations are executed in order:
+ * 1. Remove parameters (from highest to lowest index to avoid shifting issues)
+ * 2. Add parameters
+ * 3. Reorder parameters (optional)
+ */
+export function buildChangeMethodSignatureRecipe(
+  methodPattern: string,
+  parametersToAdd: ParameterToAdd[] = [],
+  parameterIndicesToRemove: number[] = [],
+  newParameterOrder?: string[],
+  options: RecipeOptions = {}
+): string {
+  const recipeItems: string[] = [];
+  let recipeIndex = 0;
+
+  // Sort removal indices from highest to lowest to avoid index shifting
+  const sortedRemovalIndices = [...parameterIndicesToRemove].sort((a, b) => b - a);
+
+  // Add removal recipes first (highest index first)
+  for (const index of sortedRemovalIndices) {
+    recipeItems.push(`  - org.openrewrite.java.DeleteMethodArgument:
+      methodPattern: ${methodPattern}
+      argumentIndex: ${index}`);
+    recipeIndex++;
+  }
+
+  // Add parameter addition recipes
+  for (const param of parametersToAdd) {
+    const indexLine = param.index !== undefined ? `\n      parameterIndex: ${param.index}` : '';
+    recipeItems.push(`  - org.openrewrite.java.AddMethodParameter:
+      methodPattern: ${methodPattern}
+      parameterType: ${param.type}
+      parameterName: ${param.name}${indexLine}`);
+    recipeIndex++;
+  }
+
+  // Add reorder recipe if specified
+  if (newParameterOrder && newParameterOrder.length > 0) {
+    recipeItems.push(`  - org.openrewrite.java.ReorderMethodArguments:
+      methodPattern: ${methodPattern}
+      newParameterNames: [${newParameterOrder.join(', ')}]`);
+  }
+
+  return `
+type: specs.openrewrite.org/v1beta/recipe
+name: ${options.name || 'com.custom.ChangeMethodSignature'}
+displayName: ${options.displayName || 'Change Method Signature'}
+description: ${options.description || 'Change method signature with multiple operations'}
+recipeList:
+${recipeItems.join('\n')}
+`.trim();
+}

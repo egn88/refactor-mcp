@@ -28,12 +28,15 @@ export {
   javaReorderParameters,
   javaReorderParametersSchema,
   javaReorderParametersTool,
+  javaChangeMethodSignature,
+  javaChangeMethodSignatureSchema,
+  javaChangeMethodSignatureTool,
 } from './signature.js';
 
 // Import tools for the combined array
 import { javaRenameClassTool, javaRenameMethodTool, javaRenameFieldTool } from './rename.js';
 import { javaMoveClassTool } from './move.js';
-import { javaAddParameterTool, javaRemoveParameterTool, javaReorderParametersTool } from './signature.js';
+import { javaAddParameterTool, javaRemoveParameterTool, javaReorderParametersTool, javaChangeMethodSignatureTool } from './signature.js';
 
 // Combined array of all Java tools
 export const javaTools = [
@@ -44,4 +47,5 @@ export const javaTools = [
   javaAddParameterTool,
   javaRemoveParameterTool,
   javaReorderParametersTool,
+  javaChangeMethodSignatureTool,
 ];

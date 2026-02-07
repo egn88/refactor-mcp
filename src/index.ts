@@ -27,6 +27,8 @@ import {
   typescriptAddParameterSchema,
   typescriptRemoveParameter,
   typescriptRemoveParameterSchema,
+  typescriptChangeFunctionSignature,
+  typescriptChangeFunctionSignatureSchema,
 } from './tools/typescript/index.js';
 
 // Import Java tools
@@ -46,6 +48,8 @@ import {
   javaRemoveParameterSchema,
   javaReorderParameters,
   javaReorderParametersSchema,
+  javaChangeMethodSignature,
+  javaChangeMethodSignatureSchema,
 } from './tools/java/index.js';
 
 // Combine all tools
@@ -118,6 +122,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await typescriptRemoveParameter(params);
         break;
       }
+      case 'typescript_change_function_signature': {
+        const params = typescriptChangeFunctionSignatureSchema.parse(args);
+        result = await typescriptChangeFunctionSignature(params);
+        break;
+      }
 
       // Java tools
       case 'java_rename_class': {
@@ -153,6 +162,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'java_reorder_parameters': {
         const params = javaReorderParametersSchema.parse(args);
         result = await javaReorderParameters(config, params);
+        break;
+      }
+      case 'java_change_method_signature': {
+        const params = javaChangeMethodSignatureSchema.parse(args);
+        result = await javaChangeMethodSignature(config, params);
         break;
       }
 
