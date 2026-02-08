@@ -16,6 +16,7 @@ export const javaRenameClassSchema = z.object({
   oldFullyQualifiedName: z.string().describe('Current fully qualified class name (e.g., com.example.OldClass)'),
   newFullyQualifiedName: z.string().describe('New fully qualified class name (e.g., com.example.NewClass)'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaRenameClassParams = z.infer<typeof javaRenameClassSchema>;
@@ -28,6 +29,7 @@ export const javaRenameMethodSchema = z.object({
   newMethodName: z.string().describe('New method name'),
   parameterTypes: z.array(z.string()).optional().describe('Optional: parameter types to match specific overload'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaRenameMethodParams = z.infer<typeof javaRenameMethodSchema>;
@@ -39,6 +41,7 @@ export const javaRenameFieldSchema = z.object({
   oldFieldName: z.string().describe('Current field name'),
   newFieldName: z.string().describe('New field name'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaRenameFieldParams = z.infer<typeof javaRenameFieldSchema>;
@@ -74,7 +77,8 @@ export async function javaRenameClass(config: Config, params: JavaRenameClassPar
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     return formatRefactoringResult({
@@ -141,7 +145,8 @@ export async function javaRenameMethod(config: Config, params: JavaRenameMethodP
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     return formatRefactoringResult({
@@ -206,7 +211,8 @@ export async function javaRenameField(config: Config, params: JavaRenameFieldPar
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     return formatRefactoringResult({
@@ -252,6 +258,10 @@ export const javaRenameClassTool = {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
       },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
+      },
     },
     required: ['projectPath', 'oldFullyQualifiedName', 'newFullyQualifiedName'],
   },
@@ -288,6 +298,10 @@ export const javaRenameMethodTool = {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
       },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
+      },
     },
     required: ['projectPath', 'className', 'oldMethodName', 'newMethodName'],
   },
@@ -318,6 +332,10 @@ export const javaRenameFieldTool = {
       dryRun: {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
+      },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
       },
     },
     required: ['projectPath', 'className', 'oldFieldName', 'newFieldName'],

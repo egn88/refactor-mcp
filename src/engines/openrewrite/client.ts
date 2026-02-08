@@ -144,7 +144,8 @@ export class OpenRewriteClient {
   async runRecipeWithBuildTool(
     projectPath: string,
     recipeYaml: string,
-    dryRun: boolean = true
+    dryRun: boolean = true,
+    javaVersion?: string
   ): Promise<OpenRewriteResult> {
     const resolvedPath = resolve(projectPath);
 
@@ -196,7 +197,7 @@ export class OpenRewriteClient {
         ];
       }
 
-      const result = await this.executeCommandInDir(command, args, resolvedPath);
+      const result = await this.executeCommandInDir(command, args, resolvedPath, javaVersion);
 
       const combinedOutput = result.stdout + result.stderr;
 
@@ -312,27 +313,39 @@ export class OpenRewriteClient {
   private async executeCommandInDir(
     command: string,
     args: string[],
-    cwd: string
+    cwd: string,
+    javaVersion?: string
   ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
-      const process = spawn(command, args, {
+      // Build the full command, optionally with SDKMAN Java version
+      let fullCommand: string;
+      if (javaVersion) {
+        // Use SDKMAN to set Java version before running the command
+        const sdkmanInit = 'source "$HOME/.sdkman/bin/sdkman-init.sh"';
+        const sdkUse = `sdk use java ${javaVersion}`;
+        const mainCommand = `${command} ${args.join(' ')}`;
+        fullCommand = `${sdkmanInit} && ${sdkUse} && ${mainCommand}`;
+      } else {
+        fullCommand = `${command} ${args.join(' ')}`;
+      }
+
+      const childProcess = spawn('bash', ['-c', fullCommand], {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: true,
       });
 
       let stdout = '';
       let stderr = '';
 
-      process.stdout.on('data', (data) => {
+      childProcess.stdout.on('data', (data) => {
         stdout += data.toString();
       });
 
-      process.stderr.on('data', (data) => {
+      childProcess.stderr.on('data', (data) => {
         stderr += data.toString();
       });
 
-      process.on('close', (code) => {
+      childProcess.on('close', (code) => {
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {
@@ -340,7 +353,7 @@ export class OpenRewriteClient {
         }
       });
 
-      process.on('error', (error) => {
+      childProcess.on('error', (error) => {
         reject(error);
       });
     });

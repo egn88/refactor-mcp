@@ -12,6 +12,7 @@ export const javaMoveClassSchema = z.object({
   newPackage: z.string().describe('New package name (e.g., com.example.new)'),
   recursive: z.boolean().default(true).describe('Also move sub-packages (default: true)'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaMoveClassParams = z.infer<typeof javaMoveClassSchema>;
@@ -48,7 +49,8 @@ export async function javaMoveClass(config: Config, params: JavaMoveClassParams)
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     return formatRefactoringResult({
@@ -97,6 +99,10 @@ export const javaMoveClassTool = {
       dryRun: {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
+      },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
       },
     },
     required: ['projectPath', 'oldPackage', 'newPackage'],

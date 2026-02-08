@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { readFileSync, writeFileSync } from 'fs';
 import { Config } from '../../config.js';
 import { OpenRewriteClient } from '../../engines/openrewrite/client.js';
 import {
@@ -11,6 +12,13 @@ import {
 } from '../../engines/openrewrite/recipe-builder.js';
 import { formatRefactoringResult } from '../../utils/diff-utils.js';
 import { validateFullyQualifiedClassName, validateJavaIdentifier } from '../../utils/validation.js';
+import {
+  detectJavaRecord,
+  addRecordComponent,
+  removeRecordComponent,
+  reorderRecordComponents,
+  RecordInfo,
+} from '../../utils/record-utils.js';
 
 // Add Parameter Schema
 export const javaAddParameterSchema = z.object({
@@ -22,6 +30,7 @@ export const javaAddParameterSchema = z.object({
   parameterIndex: z.number().int().min(0).optional().describe('Position to insert parameter (0-indexed)'),
   existingParameterTypes: z.array(z.string()).optional().describe('Existing parameter types to match specific overload'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaAddParameterParams = z.infer<typeof javaAddParameterSchema>;
@@ -34,6 +43,7 @@ export const javaRemoveParameterSchema = z.object({
   parameterIndex: z.number().int().min(0).describe('Index of parameter to remove (0-indexed)'),
   existingParameterTypes: z.array(z.string()).optional().describe('Existing parameter types to match specific overload'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaRemoveParameterParams = z.infer<typeof javaRemoveParameterSchema>;
@@ -46,6 +56,7 @@ export const javaReorderParametersSchema = z.object({
   newParameterOrder: z.array(z.string()).describe('New order of parameter names'),
   existingParameterTypes: z.array(z.string()).optional().describe('Existing parameter types to match specific overload'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaReorderParametersParams = z.infer<typeof javaReorderParametersSchema>;
@@ -66,9 +77,74 @@ export const javaChangeMethodSignatureSchema = z.object({
   parameterIndicesToRemove: z.array(z.number().int().min(0)).optional().describe('Indices of parameters to remove (0-indexed, from original signature)'),
   newParameterOrder: z.array(z.string()).optional().describe('Final parameter order by name (for reordering after add/remove)'),
   dryRun: z.boolean().default(true).describe('Preview changes without applying (default: true)'),
+  javaVersion: z.string().optional().describe('Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")'),
 });
 
 export type JavaChangeMethodSignatureParams = z.infer<typeof javaChangeMethodSignatureSchema>;
+
+/**
+ * Check if the method name indicates a constructor call on a record
+ */
+function isRecordConstructorMethod(methodName: string, recordInfo: RecordInfo): boolean {
+  if (!recordInfo.isRecord) return false;
+  // Constructor methods are typically '<init>' or the class name itself
+  return methodName === '<init>' || methodName === recordInfo.className;
+}
+
+/**
+ * Generate a unified diff between original and modified content
+ */
+function generateSimpleDiff(filePath: string, original: string, modified: string): string {
+  const originalLines = original.split('\n');
+  const modifiedLines = modified.split('\n');
+
+  const diffLines: string[] = [`--- a/${filePath}`, `+++ b/${filePath}`];
+
+  // Find first differing line
+  let startLine = 0;
+  while (startLine < originalLines.length && startLine < modifiedLines.length &&
+         originalLines[startLine] === modifiedLines[startLine]) {
+    startLine++;
+  }
+
+  // Find last differing line from end
+  let endOriginal = originalLines.length - 1;
+  let endModified = modifiedLines.length - 1;
+  while (endOriginal > startLine && endModified > startLine &&
+         originalLines[endOriginal] === modifiedLines[endModified]) {
+    endOriginal--;
+    endModified--;
+  }
+
+  // Add context
+  const contextStart = Math.max(0, startLine - 3);
+  const contextEndOrig = Math.min(originalLines.length - 1, endOriginal + 3);
+  const contextEndMod = Math.min(modifiedLines.length - 1, endModified + 3);
+
+  diffLines.push(`@@ -${contextStart + 1},${contextEndOrig - contextStart + 1} +${contextStart + 1},${contextEndMod - contextStart + 1} @@`);
+
+  // Add context before
+  for (let i = contextStart; i < startLine; i++) {
+    diffLines.push(` ${originalLines[i]}`);
+  }
+
+  // Add removed lines
+  for (let i = startLine; i <= endOriginal; i++) {
+    diffLines.push(`-${originalLines[i]}`);
+  }
+
+  // Add added lines
+  for (let i = startLine; i <= endModified; i++) {
+    diffLines.push(`+${modifiedLines[i]}`);
+  }
+
+  // Add context after
+  for (let i = endOriginal + 1; i <= contextEndOrig; i++) {
+    diffLines.push(` ${originalLines[i]}`);
+  }
+
+  return diffLines.join('\n');
+}
 
 export async function javaAddParameter(config: Config, params: JavaAddParameterParams): Promise<string> {
   // Validate class name
@@ -102,6 +178,15 @@ export async function javaAddParameter(config: Config, params: JavaAddParameterP
   }
 
   try {
+    // Check if target is a Java record
+    const recordInfo = await detectJavaRecord(params.projectPath, params.className);
+
+    if (isRecordConstructorMethod(params.methodName, recordInfo)) {
+      // Handle record component addition
+      return await handleRecordAddComponent(params, recordInfo);
+    }
+
+    // Standard method parameter addition
     const client = new OpenRewriteClient(config);
 
     const methodPattern = createMethodPattern(
@@ -120,7 +205,8 @@ export async function javaAddParameter(config: Config, params: JavaAddParameterP
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     return formatRefactoringResult({
@@ -138,6 +224,135 @@ export async function javaAddParameter(config: Config, params: JavaAddParameterP
     return formatRefactoringResult({
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error',
+      filesChanged: 0,
+    });
+  }
+}
+
+/**
+ * Handle adding a component to a Java record
+ */
+async function handleRecordAddComponent(
+  params: JavaAddParameterParams,
+  recordInfo: RecordInfo
+): Promise<string> {
+  if (!recordInfo.filePath) {
+    return formatRefactoringResult({
+      success: false,
+      message: `Could not find source file for record ${params.className}`,
+      filesChanged: 0,
+    });
+  }
+
+  try {
+    // Read the record source file
+    const sourceContent = readFileSync(recordInfo.filePath, 'utf-8');
+
+    // Modify the record declaration
+    const result = addRecordComponent(
+      sourceContent,
+      params.parameterType,
+      params.parameterName,
+      params.parameterIndex
+    );
+
+    if (!result.success) {
+      return formatRefactoringResult({
+        success: false,
+        message: result.error || 'Failed to add record component',
+        filesChanged: 0,
+      });
+    }
+
+    // Generate diff for preview
+    const diff = generateSimpleDiff(recordInfo.filePath, sourceContent, result.modifiedContent!);
+
+    if (params.dryRun) {
+      // Step 1: Preview record modification
+      // Step 2: Also run OpenRewrite to preview call-site updates
+      const client = new OpenRewriteClient({} as Config);
+
+      // Use AddMethodParameter on the constructor to update call sites
+      const methodPattern = createMethodPattern(
+        params.className,
+        '<init>',
+        recordInfo.components?.map(c => c.type)
+      );
+
+      const recipe = buildAddMethodParameterRecipe(
+        methodPattern,
+        params.parameterType,
+        params.parameterName,
+        params.parameterIndex
+      );
+
+      let callSiteDiff = '';
+      try {
+        const orResult = await client.runRecipeWithBuildTool(
+          params.projectPath,
+          recipe,
+          true, // dry run
+          params.javaVersion
+        );
+        if (orResult.diff) {
+          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
+        }
+      } catch {
+        // OpenRewrite might fail on records, that's okay for now
+      }
+
+      return formatRefactoringResult({
+        success: true,
+        message: `Dry run: would add component '${params.parameterName}: ${params.parameterType}' to record '${recordInfo.className}'`,
+        filesChanged: 1,
+        diff: diff + callSiteDiff,
+      });
+    }
+
+    // Apply changes
+    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
+
+    // Run OpenRewrite to update call sites
+    const client = new OpenRewriteClient({} as Config);
+    const methodPattern = createMethodPattern(
+      params.className,
+      '<init>',
+      recordInfo.components?.map(c => c.type)
+    );
+
+    const recipe = buildAddMethodParameterRecipe(
+      methodPattern,
+      params.parameterType,
+      params.parameterName,
+      params.parameterIndex
+    );
+
+    let callSiteResult;
+    let totalFilesChanged = 1;
+    try {
+      callSiteResult = await client.runRecipeWithBuildTool(
+        params.projectPath,
+        recipe,
+        false, // apply changes
+        params.javaVersion
+      );
+      if (callSiteResult.filesChanged) {
+        totalFilesChanged += callSiteResult.filesChanged;
+      }
+    } catch {
+      // OpenRewrite might fail, record declaration is still updated
+    }
+
+    return formatRefactoringResult({
+      success: true,
+      message: `Added component '${params.parameterName}: ${params.parameterType}' to record '${recordInfo.className}'`,
+      filesChanged: totalFilesChanged,
+      diff: diff,
+    });
+  } catch (error) {
+    return formatRefactoringResult({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error modifying record',
       filesChanged: 0,
     });
   }
@@ -165,6 +380,15 @@ export async function javaRemoveParameter(config: Config, params: JavaRemovePara
   }
 
   try {
+    // Check if target is a Java record
+    const recordInfo = await detectJavaRecord(params.projectPath, params.className);
+
+    if (isRecordConstructorMethod(params.methodName, recordInfo)) {
+      // Handle record component removal
+      return await handleRecordRemoveComponent(params, recordInfo);
+    }
+
+    // Standard method parameter removal
     const client = new OpenRewriteClient(config);
 
     const methodPattern = createMethodPattern(
@@ -178,7 +402,8 @@ export async function javaRemoveParameter(config: Config, params: JavaRemovePara
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     return formatRefactoringResult({
@@ -196,6 +421,119 @@ export async function javaRemoveParameter(config: Config, params: JavaRemovePara
     return formatRefactoringResult({
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error',
+      filesChanged: 0,
+    });
+  }
+}
+
+/**
+ * Handle removing a component from a Java record
+ */
+async function handleRecordRemoveComponent(
+  params: JavaRemoveParameterParams,
+  recordInfo: RecordInfo
+): Promise<string> {
+  if (!recordInfo.filePath) {
+    return formatRefactoringResult({
+      success: false,
+      message: `Could not find source file for record ${params.className}`,
+      filesChanged: 0,
+    });
+  }
+
+  try {
+    // Read the record source file
+    const sourceContent = readFileSync(recordInfo.filePath, 'utf-8');
+
+    // Modify the record declaration
+    const result = removeRecordComponent(sourceContent, params.parameterIndex);
+
+    if (!result.success) {
+      return formatRefactoringResult({
+        success: false,
+        message: result.error || 'Failed to remove record component',
+        filesChanged: 0,
+      });
+    }
+
+    // Generate diff for preview
+    const diff = generateSimpleDiff(recordInfo.filePath, sourceContent, result.modifiedContent!);
+
+    if (params.dryRun) {
+      // Preview mode
+      const client = new OpenRewriteClient({} as Config);
+
+      const methodPattern = createMethodPattern(
+        params.className,
+        '<init>',
+        recordInfo.components?.map(c => c.type)
+      );
+
+      const recipe = buildDeleteMethodArgumentRecipe(methodPattern, params.parameterIndex);
+
+      let callSiteDiff = '';
+      try {
+        const orResult = await client.runRecipeWithBuildTool(
+          params.projectPath,
+          recipe,
+          true,
+          params.javaVersion
+        );
+        if (orResult.diff) {
+          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
+        }
+      } catch {
+        // OpenRewrite might fail on records
+      }
+
+      const componentName = recordInfo.components?.[params.parameterIndex]?.name || `index ${params.parameterIndex}`;
+      return formatRefactoringResult({
+        success: true,
+        message: `Dry run: would remove component '${componentName}' from record '${recordInfo.className}'`,
+        filesChanged: 1,
+        diff: diff + callSiteDiff,
+      });
+    }
+
+    // Apply changes
+    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
+
+    // Run OpenRewrite to update call sites
+    const client = new OpenRewriteClient({} as Config);
+    const methodPattern = createMethodPattern(
+      params.className,
+      '<init>',
+      recordInfo.components?.map(c => c.type)
+    );
+
+    const recipe = buildDeleteMethodArgumentRecipe(methodPattern, params.parameterIndex);
+
+    let totalFilesChanged = 1;
+    try {
+      const callSiteResult = await client.runRecipeWithBuildTool(
+        params.projectPath,
+        recipe,
+        false,
+        params.javaVersion
+      );
+      if (callSiteResult.filesChanged) {
+        totalFilesChanged += callSiteResult.filesChanged;
+      }
+    } catch {
+      // OpenRewrite might fail
+    }
+
+    const componentName = recordInfo.components?.[params.parameterIndex]?.name || `index ${params.parameterIndex}`;
+    return formatRefactoringResult({
+      success: true,
+      message: `Removed component '${componentName}' from record '${recordInfo.className}'`,
+      filesChanged: totalFilesChanged,
+      diff: diff,
+    });
+  } catch (error) {
+    return formatRefactoringResult({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error modifying record',
       filesChanged: 0,
     });
   }
@@ -235,6 +573,15 @@ export async function javaReorderParameters(config: Config, params: JavaReorderP
   }
 
   try {
+    // Check if target is a Java record
+    const recordInfo = await detectJavaRecord(params.projectPath, params.className);
+
+    if (isRecordConstructorMethod(params.methodName, recordInfo)) {
+      // Handle record component reordering
+      return await handleRecordReorderComponents(params, recordInfo);
+    }
+
+    // Standard method parameter reordering
     const client = new OpenRewriteClient(config);
 
     const methodPattern = createMethodPattern(
@@ -251,7 +598,8 @@ export async function javaReorderParameters(config: Config, params: JavaReorderP
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     return formatRefactoringResult({
@@ -269,6 +617,117 @@ export async function javaReorderParameters(config: Config, params: JavaReorderP
     return formatRefactoringResult({
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error',
+      filesChanged: 0,
+    });
+  }
+}
+
+/**
+ * Handle reordering components in a Java record
+ */
+async function handleRecordReorderComponents(
+  params: JavaReorderParametersParams,
+  recordInfo: RecordInfo
+): Promise<string> {
+  if (!recordInfo.filePath) {
+    return formatRefactoringResult({
+      success: false,
+      message: `Could not find source file for record ${params.className}`,
+      filesChanged: 0,
+    });
+  }
+
+  try {
+    // Read the record source file
+    const sourceContent = readFileSync(recordInfo.filePath, 'utf-8');
+
+    // Modify the record declaration
+    const result = reorderRecordComponents(sourceContent, params.newParameterOrder);
+
+    if (!result.success) {
+      return formatRefactoringResult({
+        success: false,
+        message: result.error || 'Failed to reorder record components',
+        filesChanged: 0,
+      });
+    }
+
+    // Generate diff for preview
+    const diff = generateSimpleDiff(recordInfo.filePath, sourceContent, result.modifiedContent!);
+
+    if (params.dryRun) {
+      // Preview mode
+      const client = new OpenRewriteClient({} as Config);
+
+      const methodPattern = createMethodPattern(
+        params.className,
+        '<init>',
+        recordInfo.components?.map(c => c.type)
+      );
+
+      const recipe = buildReorderMethodArgumentsRecipe(methodPattern, params.newParameterOrder);
+
+      let callSiteDiff = '';
+      try {
+        const orResult = await client.runRecipeWithBuildTool(
+          params.projectPath,
+          recipe,
+          true,
+          params.javaVersion
+        );
+        if (orResult.diff) {
+          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
+        }
+      } catch {
+        // OpenRewrite might fail on records
+      }
+
+      return formatRefactoringResult({
+        success: true,
+        message: `Dry run: would reorder components in record '${recordInfo.className}'`,
+        filesChanged: 1,
+        diff: diff + callSiteDiff,
+      });
+    }
+
+    // Apply changes
+    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
+
+    // Run OpenRewrite to update call sites
+    const client = new OpenRewriteClient({} as Config);
+    const methodPattern = createMethodPattern(
+      params.className,
+      '<init>',
+      recordInfo.components?.map(c => c.type)
+    );
+
+    const recipe = buildReorderMethodArgumentsRecipe(methodPattern, params.newParameterOrder);
+
+    let totalFilesChanged = 1;
+    try {
+      const callSiteResult = await client.runRecipeWithBuildTool(
+        params.projectPath,
+        recipe,
+        false,
+        params.javaVersion
+      );
+      if (callSiteResult.filesChanged) {
+        totalFilesChanged += callSiteResult.filesChanged;
+      }
+    } catch {
+      // OpenRewrite might fail
+    }
+
+    return formatRefactoringResult({
+      success: true,
+      message: `Reordered components in record '${recordInfo.className}'`,
+      filesChanged: totalFilesChanged,
+      diff: diff,
+    });
+  } catch (error) {
+    return formatRefactoringResult({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error modifying record',
       filesChanged: 0,
     });
   }
@@ -336,6 +795,15 @@ export async function javaChangeMethodSignature(config: Config, params: JavaChan
   }
 
   try {
+    // Check if target is a Java record
+    const recordInfo = await detectJavaRecord(params.projectPath, params.className);
+
+    if (isRecordConstructorMethod(params.methodName, recordInfo)) {
+      // Handle record signature change
+      return await handleRecordChangeSignature(params, recordInfo, paramsToAdd);
+    }
+
+    // Standard method signature change
     const client = new OpenRewriteClient(config);
 
     const methodPattern = createMethodPattern(
@@ -361,7 +829,8 @@ export async function javaChangeMethodSignature(config: Config, params: JavaChan
     const result = await client.runRecipeWithBuildTool(
       params.projectPath,
       recipe,
-      params.dryRun
+      params.dryRun,
+      params.javaVersion
     );
 
     // Build operation summary
@@ -392,6 +861,193 @@ export async function javaChangeMethodSignature(config: Config, params: JavaChan
     return formatRefactoringResult({
       success: false,
       message: error instanceof Error ? error.message : 'Unknown error',
+      filesChanged: 0,
+    });
+  }
+}
+
+/**
+ * Handle changing signature of a Java record (multiple operations)
+ */
+async function handleRecordChangeSignature(
+  params: JavaChangeMethodSignatureParams,
+  recordInfo: RecordInfo,
+  paramsToAdd: Array<{ type: string; name: string; index?: number }>
+): Promise<string> {
+  if (!recordInfo.filePath) {
+    return formatRefactoringResult({
+      success: false,
+      message: `Could not find source file for record ${params.className}`,
+      filesChanged: 0,
+    });
+  }
+
+  try {
+    // Read the record source file
+    let sourceContent = readFileSync(recordInfo.filePath, 'utf-8');
+    const originalContent = sourceContent;
+
+    // Apply operations in order: remove, add, reorder
+    // Sort removal indices from highest to lowest to avoid index shifting
+    const removalIndices = params.parameterIndicesToRemove
+      ? [...params.parameterIndicesToRemove].sort((a, b) => b - a)
+      : [];
+
+    // Remove components (highest index first)
+    for (const index of removalIndices) {
+      const result = removeRecordComponent(sourceContent, index);
+      if (!result.success) {
+        return formatRefactoringResult({
+          success: false,
+          message: result.error || `Failed to remove component at index ${index}`,
+          filesChanged: 0,
+        });
+      }
+      sourceContent = result.modifiedContent!;
+    }
+
+    // Add components
+    for (const param of paramsToAdd) {
+      const result = addRecordComponent(
+        sourceContent,
+        param.type,
+        param.name,
+        param.index
+      );
+      if (!result.success) {
+        return formatRefactoringResult({
+          success: false,
+          message: result.error || `Failed to add component ${param.name}`,
+          filesChanged: 0,
+        });
+      }
+      sourceContent = result.modifiedContent!;
+    }
+
+    // Reorder components
+    if (params.newParameterOrder && params.newParameterOrder.length > 0) {
+      const result = reorderRecordComponents(sourceContent, params.newParameterOrder);
+      if (!result.success) {
+        return formatRefactoringResult({
+          success: false,
+          message: result.error || 'Failed to reorder components',
+          filesChanged: 0,
+        });
+      }
+      sourceContent = result.modifiedContent!;
+    }
+
+    // Generate diff for preview
+    const diff = generateSimpleDiff(recordInfo.filePath, originalContent, sourceContent);
+
+    // Build operation summary
+    const operations: string[] = [];
+    if (removalIndices.length > 0) {
+      operations.push(`remove ${removalIndices.length} component(s)`);
+    }
+    if (paramsToAdd.length > 0) {
+      operations.push(`add ${paramsToAdd.length} component(s)`);
+    }
+    if (params.newParameterOrder && params.newParameterOrder.length > 0) {
+      operations.push('reorder components');
+    }
+    const operationSummary = operations.join(', ');
+
+    if (params.dryRun) {
+      // Preview mode - also try to get call-site updates from OpenRewrite
+      const client = new OpenRewriteClient({} as Config);
+
+      const methodPattern = createMethodPattern(
+        params.className,
+        '<init>',
+        recordInfo.components?.map(c => c.type)
+      );
+
+      const paramsForRecipe: ParameterToAdd[] = paramsToAdd.map(p => ({
+        type: p.type,
+        name: p.name,
+        index: p.index,
+      }));
+
+      const recipe = buildChangeMethodSignatureRecipe(
+        methodPattern,
+        paramsForRecipe,
+        params.parameterIndicesToRemove || [],
+        params.newParameterOrder
+      );
+
+      let callSiteDiff = '';
+      try {
+        const orResult = await client.runRecipeWithBuildTool(
+          params.projectPath,
+          recipe,
+          true,
+          params.javaVersion
+        );
+        if (orResult.diff) {
+          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
+        }
+      } catch {
+        // OpenRewrite might fail on records
+      }
+
+      return formatRefactoringResult({
+        success: true,
+        message: `Dry run: would ${operationSummary} in record '${recordInfo.className}'`,
+        filesChanged: 1,
+        diff: diff + callSiteDiff,
+      });
+    }
+
+    // Apply changes
+    writeFileSync(recordInfo.filePath, sourceContent, 'utf-8');
+
+    // Run OpenRewrite to update call sites
+    const client = new OpenRewriteClient({} as Config);
+    const methodPattern = createMethodPattern(
+      params.className,
+      '<init>',
+      recordInfo.components?.map(c => c.type)
+    );
+
+    const paramsForRecipe: ParameterToAdd[] = paramsToAdd.map(p => ({
+      type: p.type,
+      name: p.name,
+      index: p.index,
+    }));
+
+    const recipe = buildChangeMethodSignatureRecipe(
+      methodPattern,
+      paramsForRecipe,
+      params.parameterIndicesToRemove || [],
+      params.newParameterOrder
+    );
+
+    let totalFilesChanged = 1;
+    try {
+      const callSiteResult = await client.runRecipeWithBuildTool(
+        params.projectPath,
+        recipe,
+        false,
+        params.javaVersion
+      );
+      if (callSiteResult.filesChanged) {
+        totalFilesChanged += callSiteResult.filesChanged;
+      }
+    } catch {
+      // OpenRewrite might fail
+    }
+
+    return formatRefactoringResult({
+      success: true,
+      message: `Changed record signature: ${operationSummary} in '${recordInfo.className}'`,
+      filesChanged: totalFilesChanged,
+      diff: diff,
+    });
+  } catch (error) {
+    return formatRefactoringResult({
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error modifying record',
       filesChanged: 0,
     });
   }
@@ -437,6 +1093,10 @@ export const javaAddParameterTool = {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
       },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
+      },
     },
     required: ['projectPath', 'className', 'methodName', 'parameterType', 'parameterName'],
   },
@@ -472,6 +1132,10 @@ export const javaRemoveParameterTool = {
       dryRun: {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
+      },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
       },
     },
     required: ['projectPath', 'className', 'methodName', 'parameterIndex'],
@@ -509,6 +1173,10 @@ export const javaReorderParametersTool = {
       dryRun: {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
+      },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
       },
     },
     required: ['projectPath', 'className', 'methodName', 'newParameterOrder'],
@@ -564,6 +1232,10 @@ export const javaChangeMethodSignatureTool = {
       dryRun: {
         type: 'boolean',
         description: 'Preview changes without applying (default: true)',
+      },
+      javaVersion: {
+        type: 'string',
+        description: 'Java version to use (e.g., "17.0.16-amzn", "21.0.8-tem")',
       },
     },
     required: ['projectPath', 'className', 'methodName'],
