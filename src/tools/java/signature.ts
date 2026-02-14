@@ -7,8 +7,11 @@ import {
   buildDeleteMethodArgumentRecipe,
   buildReorderMethodArgumentsRecipe,
   buildChangeMethodSignatureRecipe,
+  buildUpdateCallSitesRecipe,
+  buildAddNullMethodArgumentRecipe,
   createMethodPattern,
   ParameterToAdd,
+  CallSiteParameterToAdd,
 } from '../../engines/openrewrite/recipe-builder.js';
 import { formatRefactoringResult } from '../../utils/diff-utils.js';
 import { validateFullyQualifiedClassName, validateJavaIdentifier } from '../../utils/validation.js';
@@ -267,23 +270,30 @@ async function handleRecordAddComponent(
     // Generate diff for preview
     const diff = generateSimpleDiff(recordInfo.filePath, sourceContent, result.modifiedContent!);
 
+    // Calculate the argument index for call sites
+    // If no index specified, add at the end (after existing components)
+    const argumentIndex = params.parameterIndex !== undefined
+      ? params.parameterIndex
+      : (recordInfo.components?.length || 0);
+
     if (params.dryRun) {
       // Step 1: Preview record modification
       // Step 2: Also run OpenRewrite to preview call-site updates
       const client = new OpenRewriteClient({} as Config);
 
-      // Use AddMethodParameter on the constructor to update call sites
+      // Use AddNullMethodArgument on the constructor to update call sites
+      // This recipe handles both method invocations AND new expressions (constructor calls)
       const methodPattern = createMethodPattern(
         params.className,
-        '<init>',
+        '<constructor>',
         recordInfo.components?.map(c => c.type)
       );
 
-      const recipe = buildAddMethodParameterRecipe(
+      const recipe = buildAddNullMethodArgumentRecipe(
         methodPattern,
+        argumentIndex,
         params.parameterType,
-        params.parameterName,
-        params.parameterIndex
+        params.parameterName
       );
 
       let callSiteDiff = '';
@@ -316,15 +326,15 @@ async function handleRecordAddComponent(
     const client = new OpenRewriteClient({} as Config);
     const methodPattern = createMethodPattern(
       params.className,
-      '<init>',
+      '<constructor>',
       recordInfo.components?.map(c => c.type)
     );
 
-    const recipe = buildAddMethodParameterRecipe(
+    const recipe = buildAddNullMethodArgumentRecipe(
       methodPattern,
+      argumentIndex,
       params.parameterType,
-      params.parameterName,
-      params.parameterIndex
+      params.parameterName
     );
 
     let callSiteResult;
@@ -463,9 +473,10 @@ async function handleRecordRemoveComponent(
       // Preview mode
       const client = new OpenRewriteClient({} as Config);
 
+      // Use <constructor> pattern to match new ClassName(...) expressions
       const methodPattern = createMethodPattern(
         params.className,
-        '<init>',
+        '<constructor>',
         recordInfo.components?.map(c => c.type)
       );
 
@@ -500,9 +511,11 @@ async function handleRecordRemoveComponent(
 
     // Run OpenRewrite to update call sites
     const client = new OpenRewriteClient({} as Config);
+
+    // Use <constructor> pattern to match new ClassName(...) expressions
     const methodPattern = createMethodPattern(
       params.className,
-      '<init>',
+      '<constructor>',
       recordInfo.components?.map(c => c.type)
     );
 
@@ -659,9 +672,10 @@ async function handleRecordReorderComponents(
       // Preview mode
       const client = new OpenRewriteClient({} as Config);
 
+      // Use <constructor> pattern to match new ClassName(...) expressions
       const methodPattern = createMethodPattern(
         params.className,
-        '<init>',
+        '<constructor>',
         recordInfo.components?.map(c => c.type)
       );
 
@@ -695,9 +709,11 @@ async function handleRecordReorderComponents(
 
     // Run OpenRewrite to update call sites
     const client = new OpenRewriteClient({} as Config);
+
+    // Use <constructor> pattern to match new ClassName(...) expressions
     const methodPattern = createMethodPattern(
       params.className,
-      '<init>',
+      '<constructor>',
       recordInfo.components?.map(c => c.type)
     );
 
@@ -957,21 +973,26 @@ async function handleRecordChangeSignature(
       // Preview mode - also try to get call-site updates from OpenRewrite
       const client = new OpenRewriteClient({} as Config);
 
+      // Use <constructor> pattern to match new ClassName(...) expressions
       const methodPattern = createMethodPattern(
         params.className,
-        '<init>',
+        '<constructor>',
         recordInfo.components?.map(c => c.type)
       );
 
-      const paramsForRecipe: ParameterToAdd[] = paramsToAdd.map(p => ({
+      // Convert parameters to CallSiteParameterToAdd format
+      // Calculate default index for parameters without explicit index
+      const existingCount = recordInfo.components?.length || 0;
+      const callSiteParams: CallSiteParameterToAdd[] = paramsToAdd.map((p, i) => ({
         type: p.type,
         name: p.name,
-        index: p.index,
+        index: p.index !== undefined ? p.index : existingCount + i,
       }));
 
-      const recipe = buildChangeMethodSignatureRecipe(
+      // Use buildUpdateCallSitesRecipe which uses AddNullMethodArgument for call sites
+      const recipe = buildUpdateCallSitesRecipe(
         methodPattern,
-        paramsForRecipe,
+        callSiteParams,
         params.parameterIndicesToRemove || [],
         params.newParameterOrder
       );
@@ -1004,21 +1025,26 @@ async function handleRecordChangeSignature(
 
     // Run OpenRewrite to update call sites
     const client = new OpenRewriteClient({} as Config);
+
+    // Use <constructor> pattern to match new ClassName(...) expressions
     const methodPattern = createMethodPattern(
       params.className,
-      '<init>',
+      '<constructor>',
       recordInfo.components?.map(c => c.type)
     );
 
-    const paramsForRecipe: ParameterToAdd[] = paramsToAdd.map(p => ({
+    // Convert parameters to CallSiteParameterToAdd format
+    const existingCount = recordInfo.components?.length || 0;
+    const callSiteParams: CallSiteParameterToAdd[] = paramsToAdd.map((p, i) => ({
       type: p.type,
       name: p.name,
-      index: p.index,
+      index: p.index !== undefined ? p.index : existingCount + i,
     }));
 
-    const recipe = buildChangeMethodSignatureRecipe(
+    // Use buildUpdateCallSitesRecipe which uses AddNullMethodArgument for call sites
+    const recipe = buildUpdateCallSitesRecipe(
       methodPattern,
-      paramsForRecipe,
+      callSiteParams,
       params.parameterIndicesToRemove || [],
       params.newParameterOrder
     );

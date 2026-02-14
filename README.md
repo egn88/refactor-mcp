@@ -10,6 +10,7 @@ A Model Context Protocol (MCP) server for automated refactoring of Java and Type
 - **Rename field** - Rename a field and update all usages
 - **Move class** - Move class(es) to a different package and update imports
 - **Add/Remove/Reorder parameters** - Modify method signatures and update all call sites
+- **Java Record support** - Full support for modifying Java record components (adds `null` to call sites)
 
 ### TypeScript/JavaScript Refactoring (via ts-morph)
 - **Rename symbol** - Rename any symbol (class, function, variable, interface, type) and update all references
@@ -171,6 +172,68 @@ The server generates OpenRewrite recipe YAML files dynamically and executes them
 
 ### TypeScript Refactoring
 Uses ts-morph to parse and manipulate the TypeScript AST directly. Changes are tracked and can be previewed as diffs before applying.
+
+## Java Records Support
+
+Java records require special handling because they have implicit canonical constructors. When you modify a record's components, **both the record declaration AND all call sites** (`new RecordName(...)`) must be updated.
+
+### How Record Modification Works
+
+When you use `java_add_parameter`, `java_remove_parameter`, or `java_change_method_signature` on a Java record (with `methodName: "<init>"` or the class name), the tool:
+
+1. **Detects the record** - Automatically identifies if the target class is a Java record
+2. **Modifies the record declaration** - Updates the record component list directly in the source file
+3. **Updates all call sites** - Uses OpenRewrite's `AddNullMethodArgument` recipe to add `null` to all `new RecordName(...)` expressions
+
+### Example: Adding a Component to a Record
+
+```java
+// Before: public record Person(String name, int age) {}
+// After:  public record Person(String name, int age, String email) {}
+
+// All call sites are updated:
+// Before: new Person("John", 30)
+// After:  new Person("John", 30, null)
+```
+
+### Important Notes for Records
+
+- **New parameters are added as `null`** - When adding a component, all existing call sites receive `null` as the new argument value. You may need to update these manually if a different default is required.
+- **Use `<init>` or `<constructor>` as methodName** - Both work for targeting record constructors
+- **Dry run first** - Always use `dryRun: true` to preview changes before applying
+
+## Technical Details: OpenRewrite Recipes
+
+Understanding which OpenRewrite recipes are used helps when troubleshooting or extending the tool.
+
+### Declarations vs Call Sites
+
+OpenRewrite has different recipes for modifying **declarations** (where methods/constructors are defined) vs **call sites** (where they are invoked):
+
+| What to Modify | Recipe | Handles |
+|----------------|--------|---------|
+| Method declaration (add param to signature) | `AddMethodParameter` | Declarations only |
+| Method/constructor calls (add argument) | `AddNullMethodArgument` | Call sites (including `new`) |
+| Method/constructor calls (add literal) | `AddLiteralMethodArgument` | Call sites (including `new`) |
+| Method/constructor calls (remove argument) | `DeleteMethodArgument` | Call sites (including `new`) |
+| Method/constructor calls (reorder args) | `ReorderMethodArguments` | Call sites (including `new`) |
+
+### Recipe Selection by Operation
+
+| Tool Operation | Regular Methods | Java Records |
+|----------------|-----------------|--------------|
+| Add parameter | `AddMethodParameter` | Record utils + `AddNullMethodArgument` |
+| Remove parameter | `DeleteMethodArgument` | Record utils + `DeleteMethodArgument` |
+| Reorder parameters | `ReorderMethodArguments` | Record utils + `ReorderMethodArguments` |
+| Batch changes | `ChangeMethodSignature` composite | Record utils + `UpdateCallSites` composite |
+
+### Method Patterns for Constructors
+
+To target constructors in method patterns, use either:
+- `com.example.MyClass <constructor>(..)` - Recommended
+- `com.example.MyClass <init>(..)` - Also works
+
+Both patterns match `new MyClass(...)` expressions when used with call-site recipes.
 
 ## License
 

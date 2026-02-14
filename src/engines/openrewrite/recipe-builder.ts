@@ -1,5 +1,38 @@
 /**
- * Builds OpenRewrite recipe YAML for various refactoring operations
+ * Builds OpenRewrite recipe YAML for various refactoring operations.
+ *
+ * ## Important: Declarations vs Call Sites
+ *
+ * OpenRewrite has different recipes for different purposes. Understanding the
+ * distinction is crucial for correct refactoring:
+ *
+ * ### Declaration Recipes (modify where methods are defined)
+ * - `AddMethodParameter` - Adds parameter to method/constructor DECLARATION only
+ *
+ * ### Call Site Recipes (modify where methods are called)
+ * - `AddNullMethodArgument` - Adds null argument to method calls AND `new ClassName(...)` expressions
+ * - `AddLiteralMethodArgument` - Adds literal argument to method calls AND `new ClassName(...)` expressions
+ * - `DeleteMethodArgument` - Removes argument from method calls AND `new ClassName(...)` expressions
+ * - `ReorderMethodArguments` - Reorders arguments in method calls AND `new ClassName(...)` expressions
+ *
+ * ### Recipe Selection Guide
+ *
+ * | Scenario | Recipe to Use |
+ * |----------|---------------|
+ * | Add param to regular method | `buildAddMethodParameterRecipe` (declaration) |
+ * | Add param to Java record | Record utils + `buildAddNullMethodArgumentRecipe` (call sites) |
+ * | Remove param (any) | `buildDeleteMethodArgumentRecipe` (handles both) |
+ * | Reorder params (any) | `buildReorderMethodArgumentsRecipe` (handles both) |
+ * | Batch changes to regular method | `buildChangeMethodSignatureRecipe` |
+ * | Batch changes to record call sites | `buildUpdateCallSitesRecipe` |
+ *
+ * ### Constructor Patterns
+ *
+ * To target constructors, use either of these method names in your pattern:
+ * - `<constructor>` - Recommended for clarity
+ * - `<init>` - Also works (JVM internal name)
+ *
+ * Example: `com.example.MyClass <constructor>(String, int)` matches `new MyClass("a", 1)`
  */
 
 export interface RecipeOptions {
@@ -72,7 +105,19 @@ recipeList:
 }
 
 /**
- * Creates a recipe to add a method parameter
+ * Creates a recipe to add a parameter to a method DECLARATION.
+ *
+ * **IMPORTANT**: This recipe ONLY modifies the method declaration itself.
+ * It does NOT update call sites (method invocations or `new ClassName(...)`).
+ *
+ * For Java records or when you need to update call sites, use:
+ * - `buildAddNullMethodArgumentRecipe()` for adding null to call sites
+ * - `buildAddLiteralMethodArgumentRecipe()` for adding literal values to call sites
+ *
+ * @param methodPattern - Pattern like "com.example.MyClass methodName(String, int)"
+ * @param parameterType - Type of the new parameter (e.g., "String", "int")
+ * @param parameterName - Name of the new parameter
+ * @param parameterIndex - Optional 0-based position for the parameter (default: end)
  */
 export function buildAddMethodParameterRecipe(
   methodPattern: string,
@@ -97,7 +142,17 @@ recipeList:
 }
 
 /**
- * Creates a recipe to delete a method argument
+ * Creates a recipe to delete an argument from method/constructor CALL SITES.
+ *
+ * This recipe handles BOTH:
+ * - Method invocations: `object.method(arg1, arg2)` → `object.method(arg1)`
+ * - Constructor calls: `new MyClass(arg1, arg2)` → `new MyClass(arg1)`
+ *
+ * Use this for both regular methods and Java records.
+ *
+ * @param methodPattern - Pattern like "com.example.MyClass methodName(String, int)"
+ *                        For constructors: "com.example.MyClass <constructor>(String, int)"
+ * @param argumentIndex - 0-based index of argument to remove
  */
 export function buildDeleteMethodArgumentRecipe(
   methodPattern: string,
@@ -117,7 +172,18 @@ recipeList:
 }
 
 /**
- * Creates a recipe to reorder method arguments
+ * Creates a recipe to reorder arguments in method/constructor CALL SITES.
+ *
+ * This recipe handles BOTH:
+ * - Method invocations: `object.method(a, b)` → `object.method(b, a)`
+ * - Constructor calls: `new MyClass(a, b)` → `new MyClass(b, a)`
+ *
+ * Use this for both regular methods and Java records.
+ *
+ * @param methodPattern - Pattern like "com.example.MyClass methodName(String, int)"
+ *                        For constructors: "com.example.MyClass <constructor>(String, int)"
+ * @param newParameterNames - Array of parameter names in desired order
+ * @param oldParameterNames - Optional: original parameter names (for validation)
  */
 export function buildReorderMethodArgumentsRecipe(
   methodPattern: string,
@@ -188,6 +254,84 @@ export function createMethodPattern(
 }
 
 /**
+ * Creates a recipe to add a null argument to method/constructor CALL SITES.
+ *
+ * This recipe handles BOTH:
+ * - Method invocations: `object.method(a)` → `object.method(a, null)`
+ * - Constructor calls: `new MyClass(a)` → `new MyClass(a, null)`
+ *
+ * **USE THIS FOR JAVA RECORDS** when adding components. The record declaration
+ * should be modified separately using record-utils, then this recipe updates all
+ * `new RecordName(...)` expressions.
+ *
+ * Unlike `buildAddMethodParameterRecipe()` which only modifies declarations,
+ * this recipe finds and updates all call sites across the codebase.
+ *
+ * @param methodPattern - Pattern like "com.example.MyClass methodName(String, int)"
+ *                        For constructors: "com.example.MyClass <constructor>(String, int)"
+ * @param argumentIndex - 0-based position where null should be inserted
+ * @param parameterType - Fully qualified type for the null value (e.g., "java.lang.String")
+ * @param parameterName - Name of the parameter (for documentation/metadata)
+ */
+export function buildAddNullMethodArgumentRecipe(
+  methodPattern: string,
+  argumentIndex: number,
+  parameterType: string,
+  parameterName: string,
+  options: RecipeOptions = {}
+): string {
+  return `
+type: specs.openrewrite.org/v1beta/recipe
+name: ${options.name || 'com.custom.AddNullArgument'}
+displayName: ${options.displayName || 'Add Null Method Argument'}
+description: ${options.description || `Add null argument for ${parameterName} to method/constructor calls`}
+recipeList:
+  - org.openrewrite.java.AddNullMethodArgument:
+      methodPattern: ${methodPattern}
+      argumentIndex: ${argumentIndex}
+      parameterType: ${parameterType}
+      parameterName: ${parameterName}
+`.trim();
+}
+
+/**
+ * Creates a recipe to add a literal argument to method/constructor CALL SITES.
+ *
+ * This recipe handles BOTH:
+ * - Method invocations: `object.method(a)` → `object.method(a, "value")`
+ * - Constructor calls: `new MyClass(a)` → `new MyClass(a, "value")`
+ *
+ * Use this when you need to add a specific default value (not null) to call sites.
+ * For null values, use `buildAddNullMethodArgumentRecipe()` instead.
+ *
+ * @param methodPattern - Pattern like "com.example.MyClass methodName(String, int)"
+ *                        For constructors: "com.example.MyClass <constructor>(String, int)"
+ * @param argumentIndex - 0-based position where the literal should be inserted
+ * @param literal - The literal value to insert (e.g., "defaultValue", "0", "true")
+ * @param primitiveType - Type of the literal: 'String' | 'int' | 'short' | 'long' | 'float' | 'double' | 'boolean' | 'char'
+ */
+export function buildAddLiteralMethodArgumentRecipe(
+  methodPattern: string,
+  argumentIndex: number,
+  literal: string,
+  primitiveType: 'String' | 'int' | 'short' | 'long' | 'float' | 'double' | 'boolean' | 'char' = 'String',
+  options: RecipeOptions = {}
+): string {
+  return `
+type: specs.openrewrite.org/v1beta/recipe
+name: ${options.name || 'com.custom.AddLiteralArgument'}
+displayName: ${options.displayName || 'Add Literal Method Argument'}
+description: ${options.description || `Add literal argument to method/constructor calls`}
+recipeList:
+  - org.openrewrite.java.AddLiteralMethodArgument:
+      methodPattern: ${methodPattern}
+      argumentIndex: ${argumentIndex}
+      literal: ${literal}
+      primitiveType: ${primitiveType}
+`.trim();
+}
+
+/**
  * Combines multiple recipes into a single composite recipe
  */
 export function buildCompositeRecipe(
@@ -221,11 +365,21 @@ export interface ParameterToAdd {
 }
 
 /**
- * Builds a composite recipe for changing method signature with multiple operations.
+ * Builds a composite recipe for changing method DECLARATIONS with multiple operations.
+ *
+ * **NOTE**: This recipe uses `AddMethodParameter` for additions, which ONLY modifies
+ * declarations. For Java records or when call sites need updating, use
+ * `buildUpdateCallSitesRecipe()` instead.
+ *
  * Operations are executed in order:
  * 1. Remove parameters (from highest to lowest index to avoid shifting issues)
- * 2. Add parameters
+ * 2. Add parameters to declarations
  * 3. Reorder parameters (optional)
+ *
+ * @param methodPattern - Pattern like "com.example.MyClass methodName(String, int)"
+ * @param parametersToAdd - Array of parameters to add with type, name, and optional index
+ * @param parameterIndicesToRemove - Array of 0-based indices to remove (processed first)
+ * @param newParameterOrder - Optional: final order of parameter names after all operations
  */
 export function buildChangeMethodSignatureRecipe(
   methodPattern: string,
@@ -270,6 +424,83 @@ type: specs.openrewrite.org/v1beta/recipe
 name: ${options.name || 'com.custom.ChangeMethodSignature'}
 displayName: ${options.displayName || 'Change Method Signature'}
 description: ${options.description || 'Change method signature with multiple operations'}
+recipeList:
+${recipeItems.join('\n')}
+`.trim();
+}
+
+/**
+ * Parameter to add to call sites (method invocations and constructor calls)
+ */
+export interface CallSiteParameterToAdd {
+  type: string;
+  name: string;
+  index: number;
+}
+
+/**
+ * Builds a composite recipe for updating CALL SITES (method invocations and constructor calls).
+ *
+ * **USE THIS FOR JAVA RECORDS** and any scenario where call sites need updating.
+ * This is different from `buildChangeMethodSignatureRecipe()` which only modifies declarations.
+ *
+ * This recipe updates:
+ * - Method invocations: `object.method(a, b)`
+ * - Constructor calls: `new MyClass(a, b)`
+ *
+ * Operations are executed in order:
+ * 1. Remove arguments (from highest to lowest index to avoid shifting issues)
+ * 2. Add null arguments at specified positions
+ * 3. Reorder arguments (optional)
+ *
+ * @param methodPattern - Pattern like "com.example.MyClass methodName(String, int)"
+ *                        For constructors: "com.example.MyClass <constructor>(String, int)"
+ * @param parametersToAdd - Array of parameters to add with type, name, and REQUIRED index
+ * @param argumentIndicesToRemove - Array of 0-based indices to remove (processed first)
+ * @param newParameterOrder - Optional: final order of parameter names after all operations
+ */
+export function buildUpdateCallSitesRecipe(
+  methodPattern: string,
+  parametersToAdd: CallSiteParameterToAdd[] = [],
+  argumentIndicesToRemove: number[] = [],
+  newParameterOrder?: string[],
+  options: RecipeOptions = {}
+): string {
+  const recipeItems: string[] = [];
+
+  // Sort removal indices from highest to lowest to avoid index shifting
+  const sortedRemovalIndices = [...argumentIndicesToRemove].sort((a, b) => b - a);
+
+  // Add removal recipes first (highest index first)
+  for (const index of sortedRemovalIndices) {
+    recipeItems.push(`  - org.openrewrite.java.DeleteMethodArgument:
+      methodPattern: ${methodPattern}
+      argumentIndex: ${index}`);
+  }
+
+  // Add null argument addition recipes (uses AddNullMethodArgument which updates call sites)
+  // Sort by index to add in correct order
+  const sortedParamsToAdd = [...parametersToAdd].sort((a, b) => a.index - b.index);
+  for (const param of sortedParamsToAdd) {
+    recipeItems.push(`  - org.openrewrite.java.AddNullMethodArgument:
+      methodPattern: ${methodPattern}
+      argumentIndex: ${param.index}
+      parameterType: ${param.type}
+      parameterName: ${param.name}`);
+  }
+
+  // Add reorder recipe if specified
+  if (newParameterOrder && newParameterOrder.length > 0) {
+    recipeItems.push(`  - org.openrewrite.java.ReorderMethodArguments:
+      methodPattern: ${methodPattern}
+      newParameterNames: [${newParameterOrder.join(', ')}]`);
+  }
+
+  return `
+type: specs.openrewrite.org/v1beta/recipe
+name: ${options.name || 'com.custom.UpdateCallSites'}
+displayName: ${options.displayName || 'Update Call Sites'}
+description: ${options.description || 'Update method/constructor call sites with new arguments'}
 recipeList:
 ${recipeItems.join('\n')}
 `.trim();
