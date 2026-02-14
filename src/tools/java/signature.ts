@@ -1082,7 +1082,7 @@ async function handleRecordChangeSignature(
 // Tool definitions for MCP
 export const javaAddParameterTool = {
   name: 'java_add_parameter',
-  description: 'Add a new parameter to a Java method and update all call sites using OpenRewrite',
+  description: 'Add a new parameter to a Java method or record constructor and update all call sites. For Java records, use methodName "<init>" or the class name to target the constructor - the tool auto-detects records and updates both the record declaration AND all "new RecordName(...)" call sites (adding null as the new argument value).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -1092,11 +1092,11 @@ export const javaAddParameterTool = {
       },
       className: {
         type: 'string',
-        description: 'Fully qualified class name containing the method',
+        description: 'Fully qualified class name containing the method or record',
       },
       methodName: {
         type: 'string',
-        description: 'Method name',
+        description: 'Method name. For record constructors, use "<init>" or the class name (e.g., "MyRecord")',
       },
       parameterType: {
         type: 'string',
@@ -1130,7 +1130,7 @@ export const javaAddParameterTool = {
 
 export const javaRemoveParameterTool = {
   name: 'java_remove_parameter',
-  description: 'Remove a parameter from a Java method and update all call sites using OpenRewrite',
+  description: 'Remove a parameter from a Java method or record constructor and update all call sites. For Java records, use methodName "<init>" or the class name - the tool auto-detects records and updates both the record declaration AND all "new RecordName(...)" call sites.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -1140,11 +1140,11 @@ export const javaRemoveParameterTool = {
       },
       className: {
         type: 'string',
-        description: 'Fully qualified class name containing the method',
+        description: 'Fully qualified class name containing the method or record',
       },
       methodName: {
         type: 'string',
-        description: 'Method name',
+        description: 'Method name. For record constructors, use "<init>" or the class name (e.g., "MyRecord")',
       },
       parameterIndex: {
         type: 'number',
@@ -1170,7 +1170,7 @@ export const javaRemoveParameterTool = {
 
 export const javaReorderParametersTool = {
   name: 'java_reorder_parameters',
-  description: 'Reorder parameters in a Java method and update all call sites using OpenRewrite',
+  description: 'Reorder parameters in a Java method or record constructor and update all call sites. For Java records, use methodName "<init>" or the class name - the tool auto-detects records and updates both the record declaration AND all "new RecordName(...)" call sites.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -1180,11 +1180,11 @@ export const javaReorderParametersTool = {
       },
       className: {
         type: 'string',
-        description: 'Fully qualified class name containing the method',
+        description: 'Fully qualified class name containing the method or record',
       },
       methodName: {
         type: 'string',
-        description: 'Method name',
+        description: 'Method name. For record constructors, use "<init>" or the class name (e.g., "MyRecord")',
       },
       newParameterOrder: {
         type: 'array',
@@ -1211,7 +1211,7 @@ export const javaReorderParametersTool = {
 
 export const javaChangeMethodSignatureTool = {
   name: 'java_change_method_signature',
-  description: 'Change a Java method signature with multiple parameter operations (add, remove, reorder) in a single refactoring. More efficient than calling individual tools when making multiple changes.',
+  description: 'Change a Java method or record constructor signature with multiple parameter operations (add, remove, reorder) in a single refactoring. More efficient than calling individual tools when making multiple changes. For Java records, use methodName "<init>" or the class name - the tool auto-detects records and updates both the record declaration AND all "new RecordName(...)" call sites (adding null for new parameters).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -1221,11 +1221,11 @@ export const javaChangeMethodSignatureTool = {
       },
       className: {
         type: 'string',
-        description: 'Fully qualified class name containing the method',
+        description: 'Fully qualified class name containing the method or record',
       },
       methodName: {
         type: 'string',
-        description: 'Method name',
+        description: 'Method name. For record constructors, use "<init>" or the class name (e.g., "MyRecord")',
       },
       existingParameterTypes: {
         type: 'array',
