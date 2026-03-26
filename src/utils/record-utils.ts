@@ -283,6 +283,54 @@ function splitComponentsRespectingGenerics(str: string): string[] {
 }
 
 /**
+ * Formatting info for preserving record style
+ */
+interface RecordFormattingInfo {
+  isMultiline: boolean;
+  indentation: string;
+  componentSeparator: string;
+}
+
+/**
+ * Detect the formatting style of a record's components
+ */
+function detectRecordFormatting(sourceContent: string, componentsStr: string, openParenPos: number): RecordFormattingInfo {
+  // Check if the original record is multiline by looking at the content between ( and )
+  const isMultiline = componentsStr.includes('\n');
+
+  if (!isMultiline) {
+    return {
+      isMultiline: false,
+      indentation: '',
+      componentSeparator: ', ',
+    };
+  }
+
+  // Detect indentation by finding the whitespace before the first component
+  // Look at what comes after the opening paren
+  const afterOpenParen = sourceContent.substring(openParenPos + 1);
+  const firstLineMatch = afterOpenParen.match(/^\s*\n(\s*)/);
+
+  let indentation = '    '; // Default to 4 spaces
+  if (firstLineMatch) {
+    indentation = firstLineMatch[1];
+  } else {
+    // Try to detect indentation from the record declaration line
+    const beforeMatch = sourceContent.substring(0, openParenPos).match(/^(\s*).*$/m);
+    if (beforeMatch) {
+      // Add extra indent (4 spaces or 1 tab)
+      indentation = beforeMatch[1] + '    ';
+    }
+  }
+
+  return {
+    isMultiline: true,
+    indentation,
+    componentSeparator: ',\n' + indentation,
+  };
+}
+
+/**
  * Find the record declaration info in source content
  * Returns the match info including positions for replacement
  */
@@ -292,6 +340,7 @@ function findRecordDeclaration(sourceContent: string): {
   componentsStr?: string;
   fullMatchStart?: number;
   fullMatchEnd?: number;
+  formatting?: RecordFormattingInfo;
 } {
   // Find record declaration: modifiers? record ClassName(
   const recordStartPattern = /(?:@\w+(?:\([^)]*\))?\s*)*(?:public\s+|private\s+|protected\s+)?(?:final\s+)?record\s+\w+\s*\(/g;
@@ -325,13 +374,36 @@ function findRecordDeclaration(sourceContent: string): {
     }
   }
 
+  // Detect formatting style
+  const formatting = detectRecordFormatting(sourceContent, componentsStr, openParenPos);
+
   return {
     found: true,
     beforeComponents,
     componentsStr,
     fullMatchStart: startMatch.index,
     fullMatchEnd: closeParenPos + 1,
+    formatting,
   };
+}
+
+/**
+ * Build formatted component list string based on formatting style
+ */
+function buildFormattedComponentList(
+  componentStrings: string[],
+  formatting: RecordFormattingInfo
+): string {
+  if (componentStrings.length === 0) {
+    return '';
+  }
+
+  if (!formatting.isMultiline) {
+    return componentStrings.join(', ');
+  }
+
+  // Multiline format: each component on its own line with proper indentation
+  return '\n' + formatting.indentation + componentStrings.join(formatting.componentSeparator) + '\n';
 }
 
 /**
@@ -354,7 +426,7 @@ export function addRecordComponent(
     };
   }
 
-  const { beforeComponents, componentsStr, fullMatchStart, fullMatchEnd } = recordInfo;
+  const { beforeComponents, componentsStr, fullMatchStart, fullMatchEnd, formatting } = recordInfo;
 
   // Parse existing components
   const components = parseRecordComponents(componentsStr!);
@@ -379,8 +451,8 @@ export function addRecordComponent(
   // Insert new component
   componentStrings.splice(insertIndex, 0, newComponent);
 
-  // Build new record declaration
-  const newComponents = componentStrings.join(', ');
+  // Build new record declaration with preserved formatting
+  const newComponents = buildFormattedComponentList(componentStrings, formatting!);
   const newDeclaration = `${beforeComponents}(${newComponents})`;
 
   // Replace in source using positions
@@ -413,7 +485,7 @@ export function removeRecordComponent(
     };
   }
 
-  const { beforeComponents, componentsStr, fullMatchStart, fullMatchEnd } = recordInfo;
+  const { beforeComponents, componentsStr, fullMatchStart, fullMatchEnd, formatting } = recordInfo;
 
   // Parse existing components
   const components = parseRecordComponents(componentsStr!);
@@ -435,8 +507,8 @@ export function removeRecordComponent(
     componentStrings.push(`${annStr}${comp.type} ${comp.name}`);
   }
 
-  // Build new record declaration
-  const newComponents = componentStrings.join(', ');
+  // Build new record declaration with preserved formatting
+  const newComponents = buildFormattedComponentList(componentStrings, formatting!);
   const newDeclaration = `${beforeComponents}(${newComponents})`;
 
   // Replace in source using positions
@@ -469,7 +541,7 @@ export function reorderRecordComponents(
     };
   }
 
-  const { beforeComponents, componentsStr, fullMatchStart, fullMatchEnd } = recordInfo;
+  const { beforeComponents, componentsStr, fullMatchStart, fullMatchEnd, formatting } = recordInfo;
 
   // Parse existing components
   const components = parseRecordComponents(componentsStr!);
@@ -499,8 +571,8 @@ export function reorderRecordComponents(
     componentStrings.push(`${annStr}${comp.type} ${comp.name}`);
   }
 
-  // Build new record declaration
-  const newComponents = componentStrings.join(', ');
+  // Build new record declaration with preserved formatting
+  const newComponents = buildFormattedComponentList(componentStrings, formatting!);
   const newDeclaration = `${beforeComponents}(${newComponents})`;
 
   // Replace in source using positions

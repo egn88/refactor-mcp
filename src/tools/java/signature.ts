@@ -251,7 +251,7 @@ async function handleRecordAddComponent(
     // Read the record source file
     const sourceContent = readFileSync(recordInfo.filePath, 'utf-8');
 
-    // Modify the record declaration
+    // Prepare the record modification (but don't apply yet)
     const result = addRecordComponent(
       sourceContent,
       params.parameterType,
@@ -276,54 +276,8 @@ async function handleRecordAddComponent(
       ? params.parameterIndex
       : (recordInfo.components?.length || 0);
 
-    if (params.dryRun) {
-      // Step 1: Preview record modification
-      // Step 2: Also run OpenRewrite to preview call-site updates
-      const client = new OpenRewriteClient({} as Config);
-
-      // Use AddNullMethodArgument on the constructor to update call sites
-      // This recipe handles both method invocations AND new expressions (constructor calls)
-      const methodPattern = createMethodPattern(
-        params.className,
-        '<constructor>',
-        recordInfo.components?.map(c => c.type)
-      );
-
-      const recipe = buildAddNullMethodArgumentRecipe(
-        methodPattern,
-        argumentIndex,
-        params.parameterType,
-        params.parameterName
-      );
-
-      let callSiteDiff = '';
-      try {
-        const orResult = await client.runRecipeWithBuildTool(
-          params.projectPath,
-          recipe,
-          true, // dry run
-          params.javaVersion
-        );
-        if (orResult.diff) {
-          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
-        }
-      } catch {
-        // OpenRewrite might fail on records, that's okay for now
-      }
-
-      return formatRefactoringResult({
-        success: true,
-        message: `Dry run: would add component '${params.parameterName}: ${params.parameterType}' to record '${recordInfo.className}'`,
-        filesChanged: 1,
-        diff: diff + callSiteDiff,
-      });
-    }
-
-    // Apply changes
-    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
-
-    // Run OpenRewrite to update call sites
-    const client = new OpenRewriteClient({} as Config);
+    // Create the method pattern using ORIGINAL components (before modification)
+    // This is critical: OpenRewrite needs to match the OLD signature to find call sites
     const methodPattern = createMethodPattern(
       params.className,
       '<constructor>',
@@ -337,10 +291,43 @@ async function handleRecordAddComponent(
       params.parameterName
     );
 
-    let callSiteResult;
-    let totalFilesChanged = 1;
+    const client = new OpenRewriteClient({} as Config);
+
+    if (params.dryRun) {
+      // Preview mode: show both record modification and call-site updates
+      let callSiteDiff = '';
+      let callSiteWarning = '';
+      try {
+        const orResult = await client.runRecipeWithBuildTool(
+          params.projectPath,
+          recipe,
+          true, // dry run
+          params.javaVersion
+        );
+        if (orResult.diff) {
+          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
+        }
+        if (!orResult.success) {
+          callSiteWarning = `\n\nWarning: OpenRewrite reported issues: ${orResult.message}`;
+        }
+      } catch (error) {
+        callSiteWarning = `\n\nWarning: OpenRewrite failed to preview call-site updates: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      }
+
+      return formatRefactoringResult({
+        success: true,
+        message: `Dry run: would add component '${params.parameterName}: ${params.parameterType}' to record '${recordInfo.className}'`,
+        filesChanged: 1,
+        diff: diff + callSiteDiff + callSiteWarning,
+      });
+    }
+
+    // IMPORTANT: Run OpenRewrite FIRST to update call sites (before modifying record declaration)
+    // This ensures OpenRewrite can compile the project and find all call sites
+    let totalFilesChanged = 0;
+    let callSiteWarning = '';
     try {
-      callSiteResult = await client.runRecipeWithBuildTool(
+      const callSiteResult = await client.runRecipeWithBuildTool(
         params.projectPath,
         recipe,
         false, // apply changes
@@ -349,13 +336,21 @@ async function handleRecordAddComponent(
       if (callSiteResult.filesChanged) {
         totalFilesChanged += callSiteResult.filesChanged;
       }
-    } catch {
-      // OpenRewrite might fail, record declaration is still updated
+      if (!callSiteResult.success) {
+        callSiteWarning = `. Warning: OpenRewrite reported issues updating call sites: ${callSiteResult.message}`;
+      }
+    } catch (error) {
+      // Report the error but continue with record modification
+      callSiteWarning = `. Warning: OpenRewrite failed to update call sites: ${error instanceof Error ? error.message : 'Unknown error'}. Manual updates may be required.`;
     }
+
+    // NOW apply the record declaration change (after call sites are updated)
+    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
+    totalFilesChanged += 1;
 
     return formatRefactoringResult({
       success: true,
-      message: `Added component '${params.parameterName}: ${params.parameterType}' to record '${recordInfo.className}'`,
+      message: `Added component '${params.parameterName}: ${params.parameterType}' to record '${recordInfo.className}'${callSiteWarning}`,
       filesChanged: totalFilesChanged,
       diff: diff,
     });
@@ -455,7 +450,7 @@ async function handleRecordRemoveComponent(
     // Read the record source file
     const sourceContent = readFileSync(recordInfo.filePath, 'utf-8');
 
-    // Modify the record declaration
+    // Prepare the record modification (but don't apply yet)
     const result = removeRecordComponent(sourceContent, params.parameterIndex);
 
     if (!result.success) {
@@ -468,21 +463,22 @@ async function handleRecordRemoveComponent(
 
     // Generate diff for preview
     const diff = generateSimpleDiff(recordInfo.filePath, sourceContent, result.modifiedContent!);
+    const componentName = recordInfo.components?.[params.parameterIndex]?.name || `index ${params.parameterIndex}`;
+
+    // Create the method pattern using ORIGINAL components (before modification)
+    const methodPattern = createMethodPattern(
+      params.className,
+      '<constructor>',
+      recordInfo.components?.map(c => c.type)
+    );
+
+    const recipe = buildDeleteMethodArgumentRecipe(methodPattern, params.parameterIndex);
+    const client = new OpenRewriteClient({} as Config);
 
     if (params.dryRun) {
       // Preview mode
-      const client = new OpenRewriteClient({} as Config);
-
-      // Use <constructor> pattern to match new ClassName(...) expressions
-      const methodPattern = createMethodPattern(
-        params.className,
-        '<constructor>',
-        recordInfo.components?.map(c => c.type)
-      );
-
-      const recipe = buildDeleteMethodArgumentRecipe(methodPattern, params.parameterIndex);
-
       let callSiteDiff = '';
+      let callSiteWarning = '';
       try {
         const orResult = await client.runRecipeWithBuildTool(
           params.projectPath,
@@ -493,35 +489,24 @@ async function handleRecordRemoveComponent(
         if (orResult.diff) {
           callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
         }
-      } catch {
-        // OpenRewrite might fail on records
+        if (!orResult.success) {
+          callSiteWarning = `\n\nWarning: OpenRewrite reported issues: ${orResult.message}`;
+        }
+      } catch (error) {
+        callSiteWarning = `\n\nWarning: OpenRewrite failed to preview call-site updates: ${error instanceof Error ? error.message : 'Unknown error'}`;
       }
 
-      const componentName = recordInfo.components?.[params.parameterIndex]?.name || `index ${params.parameterIndex}`;
       return formatRefactoringResult({
         success: true,
         message: `Dry run: would remove component '${componentName}' from record '${recordInfo.className}'`,
         filesChanged: 1,
-        diff: diff + callSiteDiff,
+        diff: diff + callSiteDiff + callSiteWarning,
       });
     }
 
-    // Apply changes
-    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
-
-    // Run OpenRewrite to update call sites
-    const client = new OpenRewriteClient({} as Config);
-
-    // Use <constructor> pattern to match new ClassName(...) expressions
-    const methodPattern = createMethodPattern(
-      params.className,
-      '<constructor>',
-      recordInfo.components?.map(c => c.type)
-    );
-
-    const recipe = buildDeleteMethodArgumentRecipe(methodPattern, params.parameterIndex);
-
-    let totalFilesChanged = 1;
+    // IMPORTANT: Run OpenRewrite FIRST to update call sites
+    let totalFilesChanged = 0;
+    let callSiteWarning = '';
     try {
       const callSiteResult = await client.runRecipeWithBuildTool(
         params.projectPath,
@@ -532,14 +517,20 @@ async function handleRecordRemoveComponent(
       if (callSiteResult.filesChanged) {
         totalFilesChanged += callSiteResult.filesChanged;
       }
-    } catch {
-      // OpenRewrite might fail
+      if (!callSiteResult.success) {
+        callSiteWarning = `. Warning: OpenRewrite reported issues updating call sites: ${callSiteResult.message}`;
+      }
+    } catch (error) {
+      callSiteWarning = `. Warning: OpenRewrite failed to update call sites: ${error instanceof Error ? error.message : 'Unknown error'}. Manual updates may be required.`;
     }
 
-    const componentName = recordInfo.components?.[params.parameterIndex]?.name || `index ${params.parameterIndex}`;
+    // NOW apply the record declaration change
+    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
+    totalFilesChanged += 1;
+
     return formatRefactoringResult({
       success: true,
-      message: `Removed component '${componentName}' from record '${recordInfo.className}'`,
+      message: `Removed component '${componentName}' from record '${recordInfo.className}'${callSiteWarning}`,
       filesChanged: totalFilesChanged,
       diff: diff,
     });
@@ -654,7 +645,7 @@ async function handleRecordReorderComponents(
     // Read the record source file
     const sourceContent = readFileSync(recordInfo.filePath, 'utf-8');
 
-    // Modify the record declaration
+    // Prepare the record modification (but don't apply yet)
     const result = reorderRecordComponents(sourceContent, params.newParameterOrder);
 
     if (!result.success) {
@@ -668,20 +659,20 @@ async function handleRecordReorderComponents(
     // Generate diff for preview
     const diff = generateSimpleDiff(recordInfo.filePath, sourceContent, result.modifiedContent!);
 
+    // Create the method pattern using ORIGINAL components (before modification)
+    const methodPattern = createMethodPattern(
+      params.className,
+      '<constructor>',
+      recordInfo.components?.map(c => c.type)
+    );
+
+    const recipe = buildReorderMethodArgumentsRecipe(methodPattern, params.newParameterOrder);
+    const client = new OpenRewriteClient({} as Config);
+
     if (params.dryRun) {
       // Preview mode
-      const client = new OpenRewriteClient({} as Config);
-
-      // Use <constructor> pattern to match new ClassName(...) expressions
-      const methodPattern = createMethodPattern(
-        params.className,
-        '<constructor>',
-        recordInfo.components?.map(c => c.type)
-      );
-
-      const recipe = buildReorderMethodArgumentsRecipe(methodPattern, params.newParameterOrder);
-
       let callSiteDiff = '';
+      let callSiteWarning = '';
       try {
         const orResult = await client.runRecipeWithBuildTool(
           params.projectPath,
@@ -692,34 +683,24 @@ async function handleRecordReorderComponents(
         if (orResult.diff) {
           callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
         }
-      } catch {
-        // OpenRewrite might fail on records
+        if (!orResult.success) {
+          callSiteWarning = `\n\nWarning: OpenRewrite reported issues: ${orResult.message}`;
+        }
+      } catch (error) {
+        callSiteWarning = `\n\nWarning: OpenRewrite failed to preview call-site updates: ${error instanceof Error ? error.message : 'Unknown error'}`;
       }
 
       return formatRefactoringResult({
         success: true,
         message: `Dry run: would reorder components in record '${recordInfo.className}'`,
         filesChanged: 1,
-        diff: diff + callSiteDiff,
+        diff: diff + callSiteDiff + callSiteWarning,
       });
     }
 
-    // Apply changes
-    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
-
-    // Run OpenRewrite to update call sites
-    const client = new OpenRewriteClient({} as Config);
-
-    // Use <constructor> pattern to match new ClassName(...) expressions
-    const methodPattern = createMethodPattern(
-      params.className,
-      '<constructor>',
-      recordInfo.components?.map(c => c.type)
-    );
-
-    const recipe = buildReorderMethodArgumentsRecipe(methodPattern, params.newParameterOrder);
-
-    let totalFilesChanged = 1;
+    // IMPORTANT: Run OpenRewrite FIRST to update call sites
+    let totalFilesChanged = 0;
+    let callSiteWarning = '';
     try {
       const callSiteResult = await client.runRecipeWithBuildTool(
         params.projectPath,
@@ -730,13 +711,20 @@ async function handleRecordReorderComponents(
       if (callSiteResult.filesChanged) {
         totalFilesChanged += callSiteResult.filesChanged;
       }
-    } catch {
-      // OpenRewrite might fail
+      if (!callSiteResult.success) {
+        callSiteWarning = `. Warning: OpenRewrite reported issues updating call sites: ${callSiteResult.message}`;
+      }
+    } catch (error) {
+      callSiteWarning = `. Warning: OpenRewrite failed to update call sites: ${error instanceof Error ? error.message : 'Unknown error'}. Manual updates may be required.`;
     }
+
+    // NOW apply the record declaration change
+    writeFileSync(recordInfo.filePath, result.modifiedContent!, 'utf-8');
+    totalFilesChanged += 1;
 
     return formatRefactoringResult({
       success: true,
-      message: `Reordered components in record '${recordInfo.className}'`,
+      message: `Reordered components in record '${recordInfo.className}'${callSiteWarning}`,
       filesChanged: totalFilesChanged,
       diff: diff,
     });
@@ -909,9 +897,12 @@ async function handleRecordChangeSignature(
       ? [...params.parameterIndicesToRemove].sort((a, b) => b - a)
       : [];
 
+    // Prepare record modifications (simulate to validate, but don't apply yet)
+    let modifiedContent = sourceContent;
+
     // Remove components (highest index first)
     for (const index of removalIndices) {
-      const result = removeRecordComponent(sourceContent, index);
+      const result = removeRecordComponent(modifiedContent, index);
       if (!result.success) {
         return formatRefactoringResult({
           success: false,
@@ -919,13 +910,13 @@ async function handleRecordChangeSignature(
           filesChanged: 0,
         });
       }
-      sourceContent = result.modifiedContent!;
+      modifiedContent = result.modifiedContent!;
     }
 
     // Add components
     for (const param of paramsToAdd) {
       const result = addRecordComponent(
-        sourceContent,
+        modifiedContent,
         param.type,
         param.name,
         param.index
@@ -937,12 +928,12 @@ async function handleRecordChangeSignature(
           filesChanged: 0,
         });
       }
-      sourceContent = result.modifiedContent!;
+      modifiedContent = result.modifiedContent!;
     }
 
     // Reorder components
     if (params.newParameterOrder && params.newParameterOrder.length > 0) {
-      const result = reorderRecordComponents(sourceContent, params.newParameterOrder);
+      const result = reorderRecordComponents(modifiedContent, params.newParameterOrder);
       if (!result.success) {
         return formatRefactoringResult({
           success: false,
@@ -950,11 +941,11 @@ async function handleRecordChangeSignature(
           filesChanged: 0,
         });
       }
-      sourceContent = result.modifiedContent!;
+      modifiedContent = result.modifiedContent!;
     }
 
     // Generate diff for preview
-    const diff = generateSimpleDiff(recordInfo.filePath, originalContent, sourceContent);
+    const diff = generateSimpleDiff(recordInfo.filePath, originalContent, modifiedContent);
 
     // Build operation summary
     const operations: string[] = [];
@@ -969,64 +960,7 @@ async function handleRecordChangeSignature(
     }
     const operationSummary = operations.join(', ');
 
-    if (params.dryRun) {
-      // Preview mode - also try to get call-site updates from OpenRewrite
-      const client = new OpenRewriteClient({} as Config);
-
-      // Use <constructor> pattern to match new ClassName(...) expressions
-      const methodPattern = createMethodPattern(
-        params.className,
-        '<constructor>',
-        recordInfo.components?.map(c => c.type)
-      );
-
-      // Convert parameters to CallSiteParameterToAdd format
-      // Calculate default index for parameters without explicit index
-      const existingCount = recordInfo.components?.length || 0;
-      const callSiteParams: CallSiteParameterToAdd[] = paramsToAdd.map((p, i) => ({
-        type: p.type,
-        name: p.name,
-        index: p.index !== undefined ? p.index : existingCount + i,
-      }));
-
-      // Use buildUpdateCallSitesRecipe which uses AddNullMethodArgument for call sites
-      const recipe = buildUpdateCallSitesRecipe(
-        methodPattern,
-        callSiteParams,
-        params.parameterIndicesToRemove || [],
-        params.newParameterOrder
-      );
-
-      let callSiteDiff = '';
-      try {
-        const orResult = await client.runRecipeWithBuildTool(
-          params.projectPath,
-          recipe,
-          true,
-          params.javaVersion
-        );
-        if (orResult.diff) {
-          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
-        }
-      } catch {
-        // OpenRewrite might fail on records
-      }
-
-      return formatRefactoringResult({
-        success: true,
-        message: `Dry run: would ${operationSummary} in record '${recordInfo.className}'`,
-        filesChanged: 1,
-        diff: diff + callSiteDiff,
-      });
-    }
-
-    // Apply changes
-    writeFileSync(recordInfo.filePath, sourceContent, 'utf-8');
-
-    // Run OpenRewrite to update call sites
-    const client = new OpenRewriteClient({} as Config);
-
-    // Use <constructor> pattern to match new ClassName(...) expressions
+    // Create the method pattern using ORIGINAL components (before modification)
     const methodPattern = createMethodPattern(
       params.className,
       '<constructor>',
@@ -1049,7 +983,40 @@ async function handleRecordChangeSignature(
       params.newParameterOrder
     );
 
-    let totalFilesChanged = 1;
+    const client = new OpenRewriteClient({} as Config);
+
+    if (params.dryRun) {
+      // Preview mode
+      let callSiteDiff = '';
+      let callSiteWarning = '';
+      try {
+        const orResult = await client.runRecipeWithBuildTool(
+          params.projectPath,
+          recipe,
+          true,
+          params.javaVersion
+        );
+        if (orResult.diff) {
+          callSiteDiff = '\n\n--- Call site updates (via OpenRewrite) ---\n' + orResult.diff;
+        }
+        if (!orResult.success) {
+          callSiteWarning = `\n\nWarning: OpenRewrite reported issues: ${orResult.message}`;
+        }
+      } catch (error) {
+        callSiteWarning = `\n\nWarning: OpenRewrite failed to preview call-site updates: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      }
+
+      return formatRefactoringResult({
+        success: true,
+        message: `Dry run: would ${operationSummary} in record '${recordInfo.className}'`,
+        filesChanged: 1,
+        diff: diff + callSiteDiff + callSiteWarning,
+      });
+    }
+
+    // IMPORTANT: Run OpenRewrite FIRST to update call sites
+    let totalFilesChanged = 0;
+    let callSiteWarning = '';
     try {
       const callSiteResult = await client.runRecipeWithBuildTool(
         params.projectPath,
@@ -1060,13 +1027,20 @@ async function handleRecordChangeSignature(
       if (callSiteResult.filesChanged) {
         totalFilesChanged += callSiteResult.filesChanged;
       }
-    } catch {
-      // OpenRewrite might fail
+      if (!callSiteResult.success) {
+        callSiteWarning = `. Warning: OpenRewrite reported issues updating call sites: ${callSiteResult.message}`;
+      }
+    } catch (error) {
+      callSiteWarning = `. Warning: OpenRewrite failed to update call sites: ${error instanceof Error ? error.message : 'Unknown error'}. Manual updates may be required.`;
     }
+
+    // NOW apply the record declaration change
+    writeFileSync(recordInfo.filePath, modifiedContent, 'utf-8');
+    totalFilesChanged += 1;
 
     return formatRefactoringResult({
       success: true,
-      message: `Changed record signature: ${operationSummary} in '${recordInfo.className}'`,
+      message: `Changed record signature: ${operationSummary} in '${recordInfo.className}'${callSiteWarning}`,
       filesChanged: totalFilesChanged,
       diff: diff,
     });

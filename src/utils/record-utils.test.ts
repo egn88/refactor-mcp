@@ -404,3 +404,98 @@ public record Person(
     expect(result.modifiedContent).toContain('String email');
   });
 });
+
+describe('multiline record formatting preservation', () => {
+  it('should preserve multiline format when adding component', () => {
+    const source = `
+package com.example;
+
+public record Person(
+    String name,
+    int age
+) {
+}
+`;
+    const result = addRecordComponent(source, 'String', 'email');
+    expect(result.success).toBe(true);
+    // Should preserve multiline format
+    expect(result.modifiedContent).toContain('\n    String name');
+    expect(result.modifiedContent).toContain('\n    int age');
+    expect(result.modifiedContent).toContain('\n    String email');
+  });
+
+  it('should preserve multiline format when removing component', () => {
+    const source = `
+package com.example;
+
+public record Person(
+    String name,
+    int age,
+    String email
+) {
+}
+`;
+    const result = removeRecordComponent(source, 1); // Remove 'age'
+    expect(result.success).toBe(true);
+    // Should preserve multiline format
+    expect(result.modifiedContent).toContain('\n    String name');
+    expect(result.modifiedContent).toContain('\n    String email');
+    expect(result.modifiedContent).not.toContain('int age');
+  });
+
+  it('should preserve multiline format when reordering components', () => {
+    const source = `
+package com.example;
+
+public record Person(
+    String name,
+    int age,
+    String email
+) {
+}
+`;
+    const result = reorderRecordComponents(source, ['email', 'name', 'age']);
+    expect(result.success).toBe(true);
+    // Should preserve multiline format
+    expect(result.modifiedContent).toContain('\n    String email');
+    expect(result.modifiedContent).toContain('\n    String name');
+    expect(result.modifiedContent).toContain('\n    int age');
+    // Verify order
+    const emailPos = result.modifiedContent!.indexOf('String email');
+    const namePos = result.modifiedContent!.indexOf('String name');
+    const agePos = result.modifiedContent!.indexOf('int age');
+    expect(emailPos).toBeLessThan(namePos);
+    expect(namePos).toBeLessThan(agePos);
+  });
+
+  it('should keep single-line format when adding to single-line record', () => {
+    const source = `
+package com.example;
+
+public record Person(String name, int age) {
+}
+`;
+    const result = addRecordComponent(source, 'String', 'email');
+    expect(result.success).toBe(true);
+    // Should remain single-line
+    expect(result.modifiedContent).toContain('public record Person(String name, int age, String email)');
+  });
+
+  it('should preserve indentation with tabs', () => {
+    const source = `
+package com.example;
+
+public record Person(
+\tString name,
+\tint age
+) {
+}
+`;
+    const result = addRecordComponent(source, 'String', 'email');
+    expect(result.success).toBe(true);
+    // Should preserve tab indentation
+    expect(result.modifiedContent).toContain('\n\tString name');
+    expect(result.modifiedContent).toContain('\n\tint age');
+    expect(result.modifiedContent).toContain('\n\tString email');
+  });
+});
